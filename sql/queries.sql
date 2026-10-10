@@ -1,0 +1,78 @@
+-- ============================================================
+-- Analytical queries for the weather_daily table
+-- Each query is commented out. Uncomment to run.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- Query 1: Basic statistics
+-- Purpose: Average temperatures and total rainfall over the
+--          whole dataset. Good first sanity check after a load.
+-- Expected result: 1 row with aggregate values.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT
+--     ROUND(AVG(temp_max_c), 2) AS avg_temp_max,
+--     ROUND(AVG(temp_min_c), 2) AS avg_temp_min,
+--     ROUND(SUM(rain_mm), 2)    AS total_rain,
+--     MAX(temp_max_c)           AS max_temp_recorded,
+--     MIN(temp_min_c)           AS min_temp_recorded
+-- FROM weather_daily;
+
+-- ------------------------------------------------------------
+-- Query 2: Top 5 hottest and coolest days
+-- Purpose: Extremes detection; useful for quick anomaly checks.
+-- Expected result: 5 rows, sorted by temp_max_c descending.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT date, temp_max_c, temp_min_c, temp_range
+-- FROM weather_daily
+-- ORDER BY temp_max_c DESC
+-- LIMIT 5;
+
+-- Coolest days:
+-- Uncomment to run:
+-- SELECT date, temp_max_c, temp_min_c, temp_range
+-- FROM weather_daily
+-- ORDER BY temp_min_c ASC
+-- LIMIT 5;
+
+-- ------------------------------------------------------------
+-- Query 3: Days with significant temperature swings
+-- Purpose: Identify days where temp_range exceeds 10°C —
+--          relevant for clothing/energy-demand analysis.
+-- Expected result: 0..N rows depending on the data.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT date, temp_max_c, temp_min_c, ROUND(temp_range, 2) AS temp_range
+-- FROM weather_daily
+-- WHERE temp_range > 10
+-- ORDER BY temp_range DESC;
+
+-- ------------------------------------------------------------
+-- Query 4: Rainy days percentage
+-- Purpose: Share of days with measurable rain (> 0 mm).
+-- Expected result: 1 row with count and percentage.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT
+--     COUNT(*) FILTER (WHERE rain_mm > 0)                AS rainy_days,
+--     COUNT(*)                                           AS total_days,
+--     ROUND(100.0 * COUNT(*) FILTER (WHERE rain_mm > 0) / COUNT(*), 1) AS rainy_pct
+-- FROM weather_daily;
+
+-- ------------------------------------------------------------
+-- Query 5: Weekly aggregation
+-- Purpose: Roll daily data up to ISO weeks to observe trends.
+--          Requires at least a few days of data.
+-- Expected result: 1 row per ISO week in the dataset.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT
+--     DATE_TRUNC('week', date)::date AS week_start,
+--     ROUND(AVG(temp_max_c), 2)      AS avg_temp_max,
+--     ROUND(AVG(temp_min_c), 2)      AS avg_temp_min,
+--     ROUND(SUM(rain_mm), 2)         AS total_rain,
+--     COUNT(*)                       AS days
+-- FROM weather_daily
+-- GROUP BY week_start
+-- ORDER BY week_start;
