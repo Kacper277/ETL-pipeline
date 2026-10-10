@@ -263,11 +263,6 @@ src/
 - Incremental/historical backfill mode with partitioned tables
 - Data quality framework (Great Expectations) instead of basic checks
 
-## 👤 Author & Contact
-
-- **GitHub:** [YOUR_USERNAME](https://github.com/YOUR_USERNAME)
-- **Email:** your.email@example.com
-
 ## 📄 License
 
-MIT License — see the [LICENSE](LICENSE) file (add one before publishing).
+MIT License — see the [LICENSE](LICENSE) file.
