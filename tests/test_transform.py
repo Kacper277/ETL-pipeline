@@ -47,6 +47,14 @@ class TestParseDailyMetrics:
     def test_row_count(self, df: pd.DataFrame) -> None:
         assert len(df) == 3
 
+    def test_all_null_rows_are_dropped(self, transformer: DataTransformer) -> None:
+        transformer.raw_data["daily"]["time"].append("2026-10-04")
+        for key in ("temperature_2m_max", "temperature_2m_min", "rain_sum"):
+            transformer.raw_data["daily"][key].append(None)
+        df = transformer.parse_daily_metrics()
+        assert len(df) == 3
+        assert df["date"].is_unique
+
     def test_missing_file_raises_error(self) -> None:
         with pytest.raises(FileNotFoundError):
             DataTransformer("does/not/exist.json")

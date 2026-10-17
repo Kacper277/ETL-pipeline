@@ -24,12 +24,13 @@ def main() -> None:
     base_url = os.getenv("OPEN_METEO_BASE_URL", "https://api.open-meteo.com/v1/forecast")
     lat = float(os.getenv("LATITUDE", "52.23"))
     lon = float(os.getenv("LONGITUDE", "21.01"))
-    days = int(os.getenv("FORECAST_DAYS", "7"))
+    days = int(os.getenv("FORECAST_DAYS", "16"))
+    past_days = int(os.getenv("PAST_DAYS", "92"))
     database_url = os.environ["DATABASE_URL"]
 
     # Extract
     extractor = DataExtractor(base_url)
-    raw = extractor.fetch_forecast(lat, lon, days)
+    raw = extractor.fetch_forecast(lat, lon, days, past_days)
     save_raw_json(raw, "data/raw/weather_raw.json")
 
     # Transform

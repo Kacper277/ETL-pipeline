@@ -60,6 +60,16 @@ class TestParameterValidation:
         extractor = DataExtractor(VALID_URL)
         with pytest.raises(ValueError):
             extractor.fetch_forecast(52.0, 21.0, days=0)
+        with pytest.raises(ValueError):
+            extractor.fetch_forecast(52.0, 21.0, days=17)
+
+    def test_past_days_bounds(self, mock_response: MagicMock) -> None:
+        extractor = DataExtractor(VALID_URL)
+        with patch("requests.get", return_value=mock_response) as mock_get:
+            extractor.fetch_forecast(52.0, 21.0, past_days=92)
+        assert mock_get.call_args.kwargs["params"]["past_days"] == 92
+        with pytest.raises(ValueError):
+            extractor.fetch_forecast(52.0, 21.0, past_days=93)
 
 
 class TestFetching:
@@ -84,6 +94,13 @@ class TestFetching:
         extractor = DataExtractor(VALID_URL)
         with pytest.raises(ValueError):
             extractor.fetch_historical(52.0, 21.0, "2026/01/01", "2026-01-10")
+
+    def test_fetch_historical_validates_range_length(self) -> None:
+        extractor = DataExtractor(VALID_URL)
+        with pytest.raises(ValueError):
+            extractor.fetch_historical(52.0, 21.0, "2026-01-01", "2026-06-01")
+        with pytest.raises(ValueError):
+            extractor.fetch_historical(52.0, 21.0, "2026-02-01", "2026-01-01")
 
     def test_fetch_historical_returns_json(self, mock_response: MagicMock) -> None:
         extractor = DataExtractor(VALID_URL)
