@@ -1,6 +1,7 @@
 """Fetch weather data from the Open-Meteo public API."""
 
 import logging
+from datetime import date
 from typing import Any
 
 import requests
@@ -13,6 +14,10 @@ VALID_LON_RANGE = (-180.0, 180.0)
 
 class ExtractionError(Exception):
     """Raised when data extraction from the API fails."""
+
+
+MAX_FORECAST_DAYS = 16
+MAX_PAST_DAYS = 92
 
 
 class DataExtractor:
@@ -53,25 +58,36 @@ class DataExtractor:
         if not VALID_LON_RANGE[0] <= lon <= VALID_LON_RANGE[1]:
             raise ValueError(f"Longitude {lon} out of range [-180, 180]")
 
-    def fetch_forecast(self, lat: float, lon: float, days: int = 7) -> dict[str, Any]:
+    def fetch_forecast(
+        self, lat: float, lon: float, days: int = 16, past_days: int = 0
+    ) -> dict[str, Any]:
         """Fetch a daily forecast for the given coordinates.
 
         Args:
             lat: Latitude in decimal degrees.
             lon: Longitude in decimal degrees.
-            days: Number of forecast days (1-16).
+            days: Number of forecast days (1-16, API maximum).
+            past_days: Number of past days to prepend (0-92, API
+                maximum). Allows gathering recent historical data in
+                the same request.
 
         Returns:
             Parsed JSON response containing ``daily`` metrics:
             temperature_2m_max, temperature_2m_min and rain_sum.
 
         Raises:
-            ValueError: On invalid coordinates or forecast horizon.
+            ValueError: On invalid coordinates or time range.
             ExtractionError: On network or HTTP errors.
         """
         self._validate_coords(lat, lon)
-        if not 1 <= days <= 16:
-            raise ValueError(f"Forecast days must be between 1 and 16, got {days}")
+        if not 1 <= days <= MAX_FORECAST_DAYS:
+            raise ValueError(
+                f"Forecast days must be between 1 and {MAX_FORECAST_DAYS}, got {days}"
+            )
+        if not 0 <= past_days <= MAX_PAST_DAYS:
+            raise ValueError(
+                f"Past days must be between 0 and {MAX_PAST_DAYS}, got {past_days}"
+            )
 
         params = {
             "latitude": lat,
@@ -79,6 +95,7 @@ class DataExtractor:
             "daily": ",".join(self.DAILY_FIELDS),
             "timezone": "auto",
             "forecast_days": days,
+            "past_days": past_days,
         }
         return self._get(params)
 
@@ -105,6 +122,14 @@ class DataExtractor:
         for name, value in (("start_date", start_date), ("end_date", end_date)):
             if len(value) != 10 or value[4] != "-" or value[7] != "-":
                 raise ValueError(f"{name} must use YYYY-MM-DD format, got {value!r}")
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+        if end < start:
+            raise ValueError("end_date must not be before start_date")
+        if (end - start).days > MAX_PAST_DAYS:
+            raise ValueError(
+                f"Historical range must not exceed {MAX_PAST_DAYS} days (~3 months)"
+            )
 
         params = {
             "latitude": lat,

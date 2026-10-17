@@ -80,6 +80,14 @@ class DataTransformer:
         if df["date"].isna().any():
             raise TransformError("One or more dates could not be parsed")
 
+        # Rows at the very edge of the requested window can come back
+        # with no measurements at all (all metrics null) - drop them.
+        metric_cols = ["temp_max_c", "temp_min_c", "rain_mm"]
+        empty_rows = df[metric_cols].isna().all(axis=1).sum()
+        if empty_rows:
+            logger.warning("Dropping %d rows with no measurements", empty_rows)
+            df = df.dropna(subset=metric_cols, how="all").reset_index(drop=True)
+
         logger.info("Parsed %d daily records", len(df))
         return df
 

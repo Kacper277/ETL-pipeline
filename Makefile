@@ -1,4 +1,4 @@
-.PHONY: setup run extract transform load test lint clean
+.PHONY: setup db-up db-down run dashboard test lint clean
 
 setup:            ## Create .env from template
 	copy .env.example .env 2>nul || true
@@ -12,6 +12,9 @@ db-down:          ## Stop all services
 
 run:              ## Run the full ETL pipeline locally
 	python -m src.pipeline
+
+dashboard:        ## Launch the Streamlit dashboard
+	streamlit run src/dashboard/app.py
 
 test:             ## Run the test suite
 	pytest -v --cov=src

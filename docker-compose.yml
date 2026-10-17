@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-weather_db}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -30,6 +30,22 @@ services:
       - .env
     volumes:
       - .:/app
+    networks:
+      - etl_network
+
+  dashboard:
+    build: .
+    container_name: etl_dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-etl_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-weather_db}
+    env_file:
+      - .env
     networks:
       - etl_network
 

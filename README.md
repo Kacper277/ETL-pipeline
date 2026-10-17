@@ -2,7 +2,7 @@
 
 A production-style ETL pipeline that extracts daily weather data from the Open-Meteo API, transforms it with pandas, and loads it into PostgreSQL.
 
-![CI](https://github.com/YOUR_USERNAME/etl-pipeline/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Kacper277/etl-pipeline/actions/workflows/ci.yml/badge.svg)
 
 ## 📑 Contents
 
@@ -11,6 +11,7 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
 - [Quick Start](#-quick-start)
 - [Configuration](#-configuration)
 - [Usage Examples](#-usage-examples)
+- [Dashboard](#-dashboard)
 - [API Documentation](#-api-documentation)
 - [Database Schema](#-database-schema)
 - [SQL Query Examples](#-sql-query-examples)
@@ -23,7 +24,7 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
 
 ## 📖 Description
 
-**What this project does:** It runs a full Extract → Transform → Load cycle. The extract stage pulls 7-day weather forecasts (or historical data) from the free Open-Meteo API and saves the raw JSON to disk. The transform stage cleans the payload with pandas, derives extra metrics, validates data quality, and exports a processed CSV. The load stage inserts the records into a PostgreSQL table using idempotent UPSERTs.
+**What this project does:** It runs a full Extract → Transform → Load cycle. The extract stage pulls up to 16 forecast days plus up to 92 past days (~3 months) of daily weather from the free Open-Meteo API and saves the raw JSON to disk. The transform stage cleans the payload with pandas, derives extra metrics, validates data quality, and exports a processed CSV. The load stage inserts the records into a PostgreSQL table using idempotent UPSERTs. A Streamlit dashboard visualizes the stored data.
 
 **Why it was built:** As a hands-on portfolio project to demonstrate practical data engineering fundamentals: working with REST APIs, pandas-based data processing, SQL and relational databases, SQLAlchemy, testing, Docker, and CI/CD.
 
@@ -81,6 +82,27 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
    docker compose exec postgres psql -U etl_user -d weather_db -c "SELECT * FROM weather_daily LIMIT 7;"
    ```
 
+7. **Launch the dashboard**
+   ```bash
+   streamlit run src/dashboard/app.py
+   # or: make dashboard
+   ```
+
+## 📊 Dashboard
+
+A Streamlit app (`src/dashboard/app.py`) reads the `weather_daily` table and shows:
+
+- KPI cards (avg max/min temp, total rain, rainy-day count)
+- Temperature line chart and daily rainfall bar chart
+- Weekly averages
+- Sidebar filters for date range and future-days-only view
+
+Run it locally with `streamlit run src/dashboard/app.py`, or via Docker Compose:
+
+```bash
+docker compose up -d dashboard   # then open http://localhost:8501
+```
+
 ## ⚙️ Configuration
 
 | Variable | Purpose | Example |
@@ -94,7 +116,8 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
 | `OPEN_METEO_BASE_URL` | Open-Meteo endpoint | `https://api.open-meteo.com/v1/forecast` |
 | `LATITUDE` | Forecast latitude | `52.23` |
 | `LONGITUDE` | Forecast longitude | `21.01` |
-| `FORECAST_DAYS` | Days of forecast (1–16) | `7` |
+| `FORECAST_DAYS` | Days of forecast (1–16, API max) | `16` |
+| `PAST_DAYS` | Days of past data (0–92, API max) | `92` |
 
 **Database connection:** the app talks to PostgreSQL via SQLAlchemy. Inside Docker Compose use `postgres` as the host (service name); locally use `localhost`.
 
@@ -151,12 +174,13 @@ date,temp_max_c,temp_min_c,rain_mm,temp_range,temp_category
 | `longitude` | float | Decimal degrees (-180..180) |
 | `daily` | csv | `temperature_2m_max,temperature_2m_min,rain_sum` |
 | `timezone` | string | `auto` |
-| `forecast_days` | int | 1–16 |
+| `forecast_days` | int | 1–16 (API maximum) |
+| `past_days` | int | 0–92, ~3 months of past data (API maximum) |
 
 **Sample call:**
 
 ```
-https://api.open-meteo.com/v1/forecast?latitude=52.23&longitude=21.01&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=auto&forecast_days=7
+https://api.open-meteo.com/v1/forecast?latitude=52.23&longitude=21.01&daily=temperature_2m_max,temperature_2m_min,rain_sum&timezone=auto&forecast_days=16&past_days=92
 ```
 
 **Response structure (relevant part):**
@@ -253,12 +277,13 @@ src/
 | pytest | ≥ 7.4 | Testing |
 | flake8 | ≥ 6.1 | Linting |
 | Docker / Compose | latest | Local infrastructure |
+| Streamlit | ≥ 1.31 | Dashboard visualization |
 | GitHub Actions | — | CI/CD |
 
 ## 🔮 Future Improvements
 
 - Orchestration with **Apache Airflow** (scheduling, retries, backfills)
-- **Streamlit** dashboard for weather analytics
+- Cloud **dashboard hosting** (deploy the Streamlit app or build a custom web UI)
 - Deployment to the **cloud** (e.g. AWS RDS + ECS)
 - Incremental/historical backfill mode with partitioned tables
 - Data quality framework (Great Expectations) instead of basic checks
