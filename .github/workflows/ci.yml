@@ -69,3 +69,64 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  # ------------------------------------------------------------------
+  # Streaming-path integration tests: the SAME docker-compose.yml used
+  # locally is the single source of truth for CI configuration.
+  # ------------------------------------------------------------------
+  integration-tests:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Compose interpolation + schema provisioning (test-only values).
+      POSTGRES_USER: etl_user
+      POSTGRES_PASSWORD: ci_test_password
+      POSTGRES_DB: weather_db
+      DATABASE_URL: postgresql+psycopg2://etl_user:ci_test_password@localhost:5432/weather_db
+      # Integration tests run on the host -> host-visible broker address.
+      KAFKA_BOOTSTRAP_SERVERS_HOST: localhost:9092
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11 (with pip cache)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start infrastructure (postgres + kafka + ui, bounded wait)
+        run: docker compose up -d --wait postgres kafka kafka-ui
+        timeout-minutes: 10
+
+      - name: Apply database schemas (batch + streaming)
+        run: |
+          docker compose exec -T postgres psql -U etl_user -d weather_db -v ON_ERROR_STOP=1 < sql/schema.sql
+          docker compose exec -T postgres psql -U etl_user -d weather_db -v ON_ERROR_STOP=1 < sql/schema_streaming.sql
+
+      - name: Provision Kafka topics (idempotent)
+        run: python scripts/create_topics.py
+
+      - name: Run integration tests
+        run: pytest -m integration -v
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          docker compose logs --tail=200 kafka kafka-ui postgres > compose_logs.txt
+          cat compose_logs.txt
+
+      - name: Upload compose logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs
+          path: compose_logs.txt
+
+      - name: Tear down stack (always, including volumes)
+        if: always()
+        run: docker compose down -v --remove-orphans

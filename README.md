@@ -1,6 +1,6 @@
-# 🌦️ Weather ETL Pipeline
+# 🌦️ Weather Data Pipeline — Batch ETL + Kafka Streaming
 
-A production-style ETL pipeline that extracts daily weather data from the Open-Meteo API, transforms it with pandas, and loads it into PostgreSQL.
+A production-style weather data project that ingests daily data from the Open-Meteo API into PostgreSQL through **two parallel paths**: a batch ETL pipeline (pandas) and a Kafka streaming pipeline (confluent-kafka), visualized with a Streamlit dashboard.
 
 ![CI](https://github.com/Kacper277/etl-pipeline/actions/workflows/ci.yml/badge.svg)
 
@@ -8,15 +8,16 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
 
 - [Description](#-description)
 - [Architecture](#-architecture)
-- [Quick Start](#-quick-start)
-- [Configuration](#-configuration)
+- [Quick Start (Batch Path)](#-quick-start-batch-path)
+- [Streaming Path Quick Start](#-streaming-path-quick-start)
+- [Configuration](#️-configuration)
 - [Usage Examples](#-usage-examples)
-- [Dashboard](#-dashboard)
 - [API Documentation](#-api-documentation)
-- [Database Schema](#-database-schema)
+- [Database Schema](#️-database-schema)
 - [SQL Query Examples](#-sql-query-examples)
+- [Design Decisions: Batch vs Streaming](#-design-decisions-batch-vs-streaming)
 - [Testing](#-testing)
-- [Development](#-development)
+- [Development](#️-development)
 - [Technologies Used](#-technologies-used)
 - [Future Improvements](#-future-improvements)
 - [Author & Contact](#-author--contact)
@@ -24,32 +25,47 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
 
 ## 📖 Description
 
-**What this project does:** It runs a full Extract → Transform → Load cycle. The extract stage pulls up to 16 forecast days plus up to 92 past days (~3 months) of daily weather from the free Open-Meteo API and saves the raw JSON to disk. The transform stage cleans the payload with pandas, derives extra metrics, validates data quality, and exports a processed CSV. The load stage inserts the records into a PostgreSQL table using idempotent UPSERTs. A Streamlit dashboard visualizes the stored data.
+**What this project does:** It runs the same ingestion problem two ways over the same source and the same analytical layer.
 
-**Why it was built:** As a hands-on portfolio project to demonstrate practical data engineering fundamentals: working with REST APIs, pandas-based data processing, SQL and relational databases, SQLAlchemy, testing, Docker, and CI/CD.
+- The **batch path** pulls up to 16 forecast days plus up to 92 past days (~3 months) of daily weather from the free Open-Meteo API, saves the raw JSON, cleans it with pandas, validates data quality, exports a processed CSV, and upserts it into PostgreSQL.
+- The **streaming path** publishes individual readings to Kafka, a micro-batching consumer validates them and writes them to PostgreSQL with idempotent upserts, routing rejects to a dead-letter topic.
+- A **Streamlit dashboard** visualizes the stored data.
+
+**Why it was built:** As a hands-on portfolio project to demonstrate practical data engineering fundamentals: REST APIs, pandas processing, SQL and relational databases, SQLAlchemy, Kafka, testing, Docker, and CI/CD — and, above all, knowing when to reach for each ingestion pattern.
 
 **Target audience:** Hiring managers evaluating candidates for junior/trainee Data Engineer positions.
 
 ## 🏗️ Architecture
 
 ```
+                BATCH PATH (default, fastest to run)
 ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
 │  OPEN-METEO │   │   EXTRACT    │   │  TRANSFORM   │   │   POSTGRES   │
 │  PUBLIC API │-->│ (fetch_data) │-->│ (process_)   │-->│ (SQLAlchemy) │
 │             │   │              │   │              │   │              │
 └─────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
- JSON Response     Raw JSON File      Clean CSV/Table    Analytical Queries
+ JSON Response     Raw JSON File      Clean CSV/Table    weather_daily
+                                                                ▲
+                STREAMING PATH (low-latency)                    │
+┌─────────────┐   ┌──────────┐   ┌──────────┐   ┌───────────┐   │
+│  OPEN-METEO │   │ PRODUCER │-->│  KAFKA   │-->│ CONSUMER  │---┘
+│  PUBLIC API │   │          │   │ 3 topics │   │ micro-    │--> weather_readings
+└─────────────┘   └──────────┘   └────┬─────┘   │ batch UPSERT
+                                      ▼         └──────┬───►
+                                 DLQ topic      (rejected records)
 ```
 
-- **Extract** — `src/extract/` — HTTP fetch with timeouts & error handling, raw JSON persistence.
-- **Transform** — `src/transform/` — DataFrame cleaning, derived columns, statistics, validation.
-- **Load** — `src/load/` — SQLAlchemy engine, DDL, UPSERT inserts (`ON CONFLICT DO NOTHING`).
+- **Batch:** `src/extract/` → `src/transform/` → `src/load/` — fetch, pandas cleaning + validation, upsert into `weather_daily`.
+- **Streaming:** `src/streaming/` — producer, JSON serialization, schema validation, micro-batching consumer with DLQ routing; rows land in `weather_readings`.
+- **Convergence:** the view `weather_readings_daily` is shaped exactly like `weather_daily`, so the analytical SQL in `sql/queries.sql` runs unchanged against either table.
 
-## 🚀 Quick Start
+Why both paths in one repository: batch covers history, backfill and replay; streaming covers near-real-time arrival. Shipping both over one source and one analytical layer shows the trade-off instead of telling it — see [Design Decisions](#-design-decisions-batch-vs-streaming).
+
+## 🚀 Quick Start (Batch Path)
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/etl-pipeline.git
+   git clone https://github.com/Kacper277/etl-pipeline.git
    cd etl-pipeline
    ```
 
@@ -88,20 +104,45 @@ A production-style ETL pipeline that extracts daily weather data from the Open-M
    # or: make dashboard
    ```
 
-## 📊 Dashboard
+That is the complete batch path — everything below is optional.
 
-A Streamlit app (`src/dashboard/app.py`) reads the `weather_daily` table and shows:
+## 📡 Streaming Path Quick Start
 
-- KPI cards (avg max/min temp, total rain, rainy-day count)
-- Temperature line chart and daily rainfall bar chart
-- Weekly averages
-- Sidebar filters for date range and future-days-only view
+Prerequisites: steps 1, 2 and 4 from the batch Quick Start (repo, dependencies, `.env`).
 
-Run it locally with `streamlit run src/dashboard/app.py`, or via Docker Compose:
+1. **Start Kafka and the UI** (waits for the broker healthcheck)
+   ```bash
+   docker compose up -d --wait kafka kafka-ui
+   ```
 
-```bash
-docker compose up -d dashboard   # then open http://localhost:8501
-```
+2. **Create the topics** (idempotent — safe to re-run)
+   ```bash
+   python scripts/create_topics.py
+   # Created topic weather.readings.raw / processed / dlq
+   ```
+
+3. **Publish a demo batch of readings** (from the host; note the env override)
+   ```bash
+   # PowerShell: $env:KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+   # bash:       export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+   python -m src.streaming.produce_demo
+   # Published 30 readings to topic weather.readings.raw
+   ```
+
+4. **Run the consumer** (Ctrl+C to stop gracefully)
+   ```bash
+   python -m src.streaming.consume
+   # Batch: 30 loaded, 0 rejected, 30 rows written
+   # Rows now in weather_readings: 30
+   ```
+
+5. **Verify the rows landed**
+   ```bash
+   docker compose exec postgres psql -U etl_user -d weather_db ^
+     -c "SELECT station_id, COUNT(*) FROM weather_readings GROUP BY station_id ORDER BY station_id;"
+   ```
+
+6. **Inspect visually** — open [http://localhost:8088](http://localhost:8088): the Kafka UI shows the three topics, partition layout, and the consumer group's committed offsets.
 
 ## ⚙️ Configuration
 
@@ -118,6 +159,16 @@ docker compose up -d dashboard   # then open http://localhost:8501
 | `LONGITUDE` | Forecast longitude | `21.01` |
 | `FORECAST_DAYS` | Days of forecast (1–16, API max) | `16` |
 | `PAST_DAYS` | Days of past data (0–92, API max) | `92` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Broker address **from inside Docker** | `kafka:29092` |
+| `KAFKA_BOOTSTRAP_SERVERS_HOST` | Broker address **from the host machine** | `localhost:9092` |
+| `KAFKA_TOPIC_RAW` | Raw readings topic | `weather.readings.raw` |
+| `KAFKA_TOPIC_PROCESSED` | Validated readings topic | `weather.readings.processed` |
+| `KAFKA_TOPIC_DLQ` | Dead-letter topic for rejects | `weather.readings.dlq` |
+| `KAFKA_CONSUMER_GROUP` | Consumer group id | `weather-ingest-v1` |
+| `KAFKA_BATCH_SIZE` | Max records per consumer micro-batch | `50` |
+| `KAFKA_BATCH_TIMEOUT_S` | Seconds before flushing a partial batch | `5` |
+
+**Two bootstrap addresses on purpose:** the broker advertises two listeners — an internal one (`kafka:29092`, resolvable only on the Compose network) and an external one (`localhost:9092`, for host-side scripts, pytest and CI). Using the wrong one produces the classic "connects, then times out waiting for node assignment" failure.
 
 **Database connection:** the app talks to PostgreSQL via SQLAlchemy. Inside Docker Compose use `postgres` as the host (service name); locally use `localhost`.
 
@@ -125,20 +176,20 @@ docker compose up -d dashboard   # then open http://localhost:8501
 
 ## 💻 Usage Examples
 
-Run the full pipeline (extract + transform + load):
+Run the full batch pipeline (extract + transform + load):
 
 ```bash
 python -m src.pipeline
 ```
 
-Use individual modules programmatically:
+Use individual batch modules programmatically:
 
 ```python
 from src.extract.fetch_data import DataExtractor
 from src.extract.save_raw import save_raw_json
 
 extractor = DataExtractor("https://api.open-meteo.com/v1/forecast")
-data = extractor.fetch_forecast(52.23, 21.01, days=7)
+data = extractor.fetch_forecast(52.23, 21.01, days=16, past_days=92)
 save_raw_json(data)
 ```
 
@@ -152,15 +203,18 @@ print(DataValidator().full_validation_report(df))
 transformer.export_to_csv(df)
 ```
 
-Expected output (`data/processed/weather_processed.csv`):
+Publish and consume streaming readings (see the [Streaming Path Quick Start](#-streaming-path-quick-start) for setup):
 
-```
-date,temp_max_c,temp_min_c,rain_mm,temp_range,temp_category
-2026-10-10,18.4,9.2,0.3,9.2,mild
-...
+```bash
+python -m src.streaming.produce_demo --stations 3 --per-station 10
+python -m src.streaming.consume
 ```
 
-*(Screenshot placeholders: `docs/screenshots/pipeline_run.png`, `docs/screenshots/psql_results.png`)*
+### 📊 Dashboard
+
+A Streamlit app (`src/dashboard/app.py`) reads the `weather_daily` table and shows KPI cards (avg max/min temp, total rain, rainy-day count), temperature line and rainfall bar charts, weekly averages, and sidebar filters. Run it with `streamlit run src/dashboard/app.py` or `docker compose up -d dashboard` (then open [http://localhost:8501](http://localhost:8501)).
+
+*(Screenshot placeholders: `docs/screenshots/pipeline_run.png`, `docs/screenshots/psql_results.png`, `docs/screenshots/kafka_ui.png`)*
 
 ## 🌐 API Documentation
 
@@ -198,6 +252,8 @@ https://api.open-meteo.com/v1/forecast?latitude=52.23&longitude=21.01&daily=temp
 
 ## 🗄️ Database Schema
 
+**Batch table** — one row per day ([`sql/schema.sql`](sql/schema.sql)):
+
 ```
 ┌────────────────────────────────────────────┐
 │               weather_daily                │
@@ -212,12 +268,26 @@ https://api.open-meteo.com/v1/forecast?latitude=52.23&longitude=21.01&daily=temp
 └────────────┴───────────────┴───────────────┘
 ```
 
-Full DDL lives in [`sql/schema.sql`](sql/schema.sql).
+**Streaming table** — one row per station reading ([`sql/schema_streaming.sql`](sql/schema_streaming.sql)):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | SERIAL | PK |
+| `station_id` | TEXT NOT NULL | Kafka partition key |
+| `observed_at` | TIMESTAMPTZ NOT NULL | reading timestamp (UTC) |
+| `temp_max_c` / `temp_min_c` | NUMERIC(5,2) | °C |
+| `rain_mm` | NUMERIC(6,2) | mm |
+| `ingested_at` | TIMESTAMPTZ DEFAULT NOW() | load time |
+
+**Why `UNIQUE (station_id, observed_at)`:** the consumer commits Kafka offsets only *after* a successful database write, so a crash between the two re-delivers the batch (at-least-once). The unique constraint plus `ON CONFLICT DO NOTHING` makes those duplicates collapse idempotently instead of double-counting. Indexes: `observed_at DESC`, `station_id`.
+
+**Convergence view:** `weather_readings_daily` (in the same file) rolls the stream to daily grain with exactly the `weather_daily` columns, so `sql/queries.sql` runs unchanged against either path.
 
 ## 🔍 SQL Query Examples
 
 ```sql
--- Basic statistics
+-- Basic statistics (runs as-is against weather_daily
+-- or weather_readings_daily — same columns)
 SELECT
     ROUND(AVG(temp_max_c), 2) AS avg_temp_max,
     ROUND(AVG(temp_min_c), 2) AS avg_temp_min,
@@ -230,19 +300,52 @@ SELECT
     COUNT(*)                            AS total_days,
     ROUND(100.0 * COUNT(*) FILTER (WHERE rain_mm > 0) / COUNT(*), 1) AS rainy_pct
 FROM weather_daily;
+
+-- Streaming table: readings per station
+SELECT station_id, COUNT(*) AS readings,
+       MIN(observed_at) AS first, MAX(observed_at) AS last
+FROM weather_readings
+GROUP BY station_id
+ORDER BY station_id;
+```
+
+Sample output of the last query against the demo run (real captured output, 3 demo stations):
+
+```
+ station_id | readings |          first           |          last
+------------+----------+--------------------------+-------------------------
+ gdansk-3   |       18 | 2026-10-19 23:17:15+00   | 2026-10-20 00:10:31+00
+ krakow-2   |       18 | 2026-10-19 23:17:15+00   | 2026-10-20 00:10:31+00
+ warsaw-1   |       18 | 2026-10-19 23:17:15+00   | 2026-10-20 00:10:31+00
 ```
 
 More analytical queries (hot days, temperature swings, weekly aggregation) are in [`sql/queries.sql`](sql/queries.sql).
 
+## ⚖️ Design Decisions: Batch vs Streaming
+
+**When batch is the right choice** — and why it is this project's default: the data arrives in large historical chunks (up to ~3 months in one API call), so one request, one DataFrame pass and one upsert are simpler, cheaper and easier to reason about than any streaming setup. Batch is also the natural tool for backfill and replay: re-running `python -m src.pipeline` is idempotent and re-derives everything from source.
+
+**When streaming is the right choice:** readings arrive continuously and consumers want them with low latency — dashboards, alerting, downstream event-driven systems. Kafka also decouples producers from consumers and retains every record, so a consumer can be re-deployed, re-partitioned or added later and replay from `earliest`.
+
+**Why a plain producer + consumer, not a stream processing framework:** the per-record work here is stateless — decode, validate, map to a row, upsert. A framework (Kafka Streams, Flink, Faust) adds a runtime, state management and dependency risk for capabilities this problem does not need. A micro-batching consumer (N records or T seconds, configurable) gets the write-efficiency benefit without the machinery. If this pipeline ever grows joins or windowed aggregation, that is the point to revisit.
+
+**Why the partition key is the station identifier:** Kafka guarantees ordering only within a partition. Keying by station keeps each station's readings ordered and co-located, so per-station logic stays correct if partitions are added for throughput.
+
+**Why at-least-once plus an idempotent upsert:** committing offsets only after a successful database write risks re-delivery on crash; committing before it risks data loss. For this workload, re-delivery is free to accept because `UNIQUE (station_id, observed_at)` + `ON CONFLICT DO NOTHING` collapses duplicates — so the simple, at-least-once design is correct without transactions. Exactly-once (consumer + producer in one transaction) would add complexity that the upsert already makes unnecessary.
+
 ## 🧪 Testing
 
+Two tiers, separated by a pytest marker:
+
 ```bash
-pytest -v --cov=src
+pytest                       # unit tests only — fast, no broker required (default)
+pytest -m integration -v     # integration tests — needs a live broker (docker compose up -d --wait kafka)
+pytest --cov=src             # unit tests with coverage
 ```
 
-- Coverage report is printed to the terminal; use `--cov-report=html` for `htmlcov/index.html`.
-- **What is tested:** URL/coordinate validation and mocked HTTP responses (extract), DataFrame building, derived columns, statistics and validation (transform), DDL execution, UPSERT counting, query execution and connection cleanup with mocked engines (load).
-- **No real API calls or database connections** are used in tests.
+- **Unit tests** (run in every CI push): mocked HTTP responses (extract), DataFrame building, derived columns, statistics, validation (transform), mocked engines (load), and the whole streaming logic — producer encoding/queueing, consumer batch/DLQ/commit semantics, and the validation gate — against mocked `confluent_kafka` objects. **No real API calls, database connections or brokers.**
+- **Integration tests** (`tests/integration/`, marker `integration`, deselected by default): a full round trip against a live broker — create topic, produce, consume, assert transformed rows — plus malformed-record → DLQ routing. Auto-skipped when `KAFKA_BOOTSTRAP_SERVERS_HOST` is unset, so a fresh clone's plain `pytest` never fails.
+- Coverage is printed to the terminal; use `--cov-report=html` for `htmlcov/index.html`.
 
 ## 🛠️ Development
 
@@ -250,19 +353,27 @@ pytest -v --cov=src
 
 ```
 src/
-├── extract/    # API client + raw persistence
-├── transform/  # pandas processing + validation
-└── load/       # schema + database loading
+├── extract/     # API client + raw persistence            (batch)
+├── transform/   # pandas processing + validation          (batch)
+├── load/        # schema + database loading               (batch)
+├── streaming/   # config, schemas, serialization,         (streaming)
+│                # producer, handlers, consumer
+└── dashboard/   # Streamlit visualization                 (analytics)
+scripts/
+└── create_topics.py   # idempotent Kafka topic provisioning
+sql/
+├── schema.sql           # batch table DDL
+├── schema_streaming.sql # streaming table + convergence view
+└── queries.sql          # analytical queries (both paths)
 ```
 
-**Adding a new feature** (e.g. a new daily metric):
+**Adding a new daily metric** (batch): add the field to `DataExtractor.DAILY_FIELDS` → map it in `parse_daily_metrics` (`src/transform/process_data.py`) → extend `src/load/schema.py` and `sql/schema.sql` → add tests.
 
-1. Add the field to `DataExtractor.DAILY_FIELDS` (`src/extract/fetch_data.py`).
-2. Map it in `parse_daily_metrics` (`src/transform/process_data.py`).
-3. Extend the table DDL in `src/load/schema.py` and `sql/schema.sql`.
-4. Add/adjust tests and run `pytest` and `flake8`.
+**Adding a new metric to the stream:** extend `WeatherEvent` + `validate_event` (`src/streaming/schemas.py`) → map it in `event_to_row` (`src/streaming/handlers.py`) → extend `weather_readings` in `sql/schema_streaming.sql` → add tests at both tiers.
 
-**Contribution guidelines:** create a feature branch, keep PEP 8 (flake8 must pass), add tests for new behavior, and keep PRs focused.
+**Adding a new source** (e.g. another weather provider): implement it behind the existing extract/streaming interfaces; the transform and load layers are source-agnostic by design.
+
+**Contribution guidelines:** create a feature branch, keep PEP 8 (flake8 must pass), add tests for new behavior at the appropriate tier, and keep PRs focused.
 
 ## 🧰 Technologies Used
 
@@ -274,19 +385,28 @@ src/
 | SQLAlchemy | ≥ 2.0 | Database ORM/engine |
 | psycopg2-binary | ≥ 2.9 | PostgreSQL driver |
 | PostgreSQL | 15 (Alpine) | Target database |
+| Apache Kafka | 4.3.1 (pinned, KRaft) | Streaming message broker |
+| confluent-kafka | ≥ 2.5 | Kafka Python client (librdkafka) |
+| kafka-ui (provectuslabs) | v0.7.2 (pinned) | Broker/topic visualization |
 | pytest | ≥ 7.4 | Testing |
 | flake8 | ≥ 6.1 | Linting |
-| Docker / Compose | latest | Local infrastructure |
+| Docker / Compose | ≥ 20.10.4 | Local infrastructure |
 | Streamlit | ≥ 1.31 | Dashboard visualization |
 | GitHub Actions | — | CI/CD |
+
+Kafka has been KRaft-only since 4.0 (no ZooKeeper); the broker runs in single-node combined mode via the official `apache/kafka:4.3.1` image.
 
 ## 🔮 Future Improvements
 
 - Orchestration with **Apache Airflow** (scheduling, retries, backfills)
+- **Schema Registry** for the Kafka events (evolving the event contract safely)
+- **Exactly-once semantics** via consumer/producer transactions, replacing the upsert-based deduplication
 - Cloud **dashboard hosting** (deploy the Streamlit app or build a custom web UI)
-- Deployment to the **cloud** (e.g. AWS RDS + ECS)
-- Incremental/historical backfill mode with partitioned tables
-- Data quality framework (Great Expectations) instead of basic checks
+- Deployment to the **cloud** (e.g. AWS RDS + ECS / MSK)
+
+## 👤 Author & Contact
+
+- **GitHub:** [Kacper277](https://github.com/Kacper277)
 
 ## 📄 License
 
