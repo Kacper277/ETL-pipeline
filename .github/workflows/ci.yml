@@ -22,7 +22,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Lint with flake8
-        run: flake8 src/ tests/
+        run: flake8 src/ tests/ scripts/ airflow/dags/
 
   test:
     runs-on: ubuntu-latest
@@ -48,13 +48,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python 3.11
+      - name: Setup Python 3.11 (with pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # DAG integrity tests need the Airflow dependency set. Installed
+      # under the official constraints file for Airflow 2.11.2 so it
+      # coexists with the app pins; no Airflow containers are started.
+      - name: Install Airflow dependency set (for DAG integrity tests)
+        run: pip install -r docker/requirements-airflow.txt --constraint https://raw.githubusercontent.com/apache/airflow/constraints-2.11.2/constraints-3.11.txt
 
       - name: Apply database schema
         run: psql postgresql://test_user:test_pass@localhost:5432/test_db -f sql/schema.sql

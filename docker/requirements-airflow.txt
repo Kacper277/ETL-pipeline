@@ -1,0 +1,13 @@
+# Runtime dependencies for the Airflow image (docker/Dockerfile.airflow).
+#
+# PINNED to the versions resolved by the official constraints file for
+# Airflow 2.11.2 + Python 3.11 (constraints-2.11.2/constraints-3.11.txt),
+# because Airflow 2.x requires SQLAlchemy <2.0. The main requirements.txt
+# keeps SQLAlchemy>=2.0.0 for the app/test environment; inside the Airflow
+# runtime the 1.4 API subset used by src/ is identical for our code paths
+# (verified by an end-to-end DAG run -- see README Design Decisions).
+pandas==2.1.4
+SQLAlchemy==1.4.54
+psycopg2-binary==2.9.11
+requests==2.32.5
+python-dotenv==1.2.2

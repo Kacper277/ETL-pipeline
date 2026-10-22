@@ -1,0 +1,25 @@
+# Airflow image for the orchestration layer.
+# Extends the official image with ONLY the project's runtime
+# dependencies (see requirements-airflow.txt); the app/test dev set
+# (pytest, flake8, streamlit, confluent-kafka) is deliberately NOT
+# installed here. apache-airflow is re-installed at the exact image
+# version so pip cannot silently upgrade/downgrade it while resolving
+# the extra requirements, and everything is installed under the
+# official constraints file for this Airflow/Python combination:
+# https://airflow.apache.org/docs/docker-stack/build.html
+FROM apache/airflow:2.11.2-python3.11
+
+COPY docker/requirements-airflow.txt /requirements-airflow.txt
+
+RUN pip install --no-cache-dir \
+        "apache-airflow==${AIRFLOW_VERSION}" \
+        -r /requirements-airflow.txt \
+        --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.11.2/constraints-3.11.txt"
+
+# Seed ownership for the artifacts named volume: on first mount the
+# volume inherits the image directory's owner, so tasks running as the
+# airflow user (UID 50000) can write there. Group 0 + umask 0002 is the
+# pattern recommended by the docker-stack docs for arbitrary users.
+USER root
+RUN umask 0002; mkdir -p /opt/airflow/artifacts && chown airflow:0 /opt/airflow/artifacts
+USER airflow

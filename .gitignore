@@ -34,3 +34,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Airflow orchestration (generated artifacts only)
+airflow/logs/
+airflow/*.db
+airflow/standalone_admin_password.txt
+airflow/webserver_config.py

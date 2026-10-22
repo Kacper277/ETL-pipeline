@@ -1,6 +1,6 @@
-# 🌦️ Weather Data Pipeline — Batch ETL + Kafka Streaming
+# 🌦️ Weather Data Pipeline — Batch ETL + Kafka Streaming + Airflow Orchestration
 
-A production-style weather data project that ingests daily data from the Open-Meteo API into PostgreSQL through **two parallel paths**: a batch ETL pipeline (pandas) and a Kafka streaming pipeline (confluent-kafka), visualized with a Streamlit dashboard.
+A production-style weather data project that ingests daily data from the Open-Meteo API into PostgreSQL through **two parallel paths** — a batch ETL pipeline (pandas) orchestrated by Apache Airflow, and a Kafka streaming pipeline (confluent-kafka) — visualized with a Streamlit dashboard.
 
 ![CI](https://github.com/Kacper277/etl-pipeline/actions/workflows/ci.yml/badge.svg)
 
@@ -10,6 +10,7 @@ A production-style weather data project that ingests daily data from the Open-Me
 - [Architecture](#-architecture)
 - [Quick Start (Batch Path)](#-quick-start-batch-path)
 - [Streaming Path Quick Start](#-streaming-path-quick-start)
+- [Orchestration (Apache Airflow)](#-orchestration-apache-airflow)
 - [Configuration](#️-configuration)
 - [Usage Examples](#-usage-examples)
 - [API Documentation](#-api-documentation)
@@ -25,7 +26,7 @@ A production-style weather data project that ingests daily data from the Open-Me
 
 ## 📖 Description
 
-**What this project does:** It runs the same ingestion problem two ways over the same source and the same analytical layer.
+**What this project does:** It runs the same ingestion problem two ways over the same source and the same analytical layer — with Airflow orchestrating the batch path.
 
 - The **batch path** pulls up to 16 forecast days plus up to 92 past days (~3 months) of daily weather from the free Open-Meteo API, saves the raw JSON, cleans it with pandas, validates data quality, exports a processed CSV, and upserts it into PostgreSQL.
 - The **streaming path** publishes individual readings to Kafka, a micro-batching consumer validates them and writes them to PostgreSQL with idempotent upserts, routing rejects to a dead-letter topic.
@@ -38,6 +39,14 @@ A production-style weather data project that ingests daily data from the Open-Me
 ## 🏗️ Architecture
 
 ```
+              ORCHESTRATION (Airflow 2.11.2, LocalExecutor)
+┌─────────────────────────────────────────────────────────────────────┐
+│  DAG weather_batch_etl_pipeline  (cron 0 0 * * *, catchup=False)    │
+│    extract >> transform >> validate >> load >> summary              │
+│    reuses src/extract, src/transform, src/load as-is                │
+│    schedules BATCH only - does NOT manage the streaming path        │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               ▼
                 BATCH PATH (default, fastest to run)
 ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
 │  OPEN-METEO │   │   EXTRACT    │   │  TRANSFORM   │   │   POSTGRES   │
@@ -46,7 +55,7 @@ A production-style weather data project that ingests daily data from the Open-Me
 └─────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
  JSON Response     Raw JSON File      Clean CSV/Table    weather_daily
                                                                 ▲
-                STREAMING PATH (low-latency)                    │
+                STREAMING PATH (low-latency, NOT scheduled)     │
 ┌─────────────┐   ┌──────────┐   ┌──────────┐   ┌───────────┐   │
 │  OPEN-METEO │   │ PRODUCER │-->│  KAFKA   │-->│ CONSUMER  │---┘
 │  PUBLIC API │   │          │   │ 3 topics │   │ micro-    │--> weather_readings
@@ -143,6 +152,63 @@ Prerequisites: steps 1, 2 and 4 from the batch Quick Start (repo, dependencies, 
    ```
 
 6. **Inspect visually** — open [http://localhost:8088](http://localhost:8088): the Kafka UI shows the three topics, partition layout, and the consumer group's committed offsets.
+
+## ⏰ Orchestration (Apache Airflow)
+
+**Purpose:** Apache Airflow schedules and monitors the batch ETL — daily runs at 00:00 UTC, retries with backoff, task-level observability in the UI, and safe backfills. It orchestrates the **batch path only**; the Kafka consumer is a long-lived process supervised by the container runtime, not a scheduled task, and is deliberately invisible to Airflow.
+
+**Minimal stack** (single node, `LocalExecutor` — no Redis, no workers, no flower; the official Celery quick-start bundle is documented as not production-ready and is overkill here):
+
+```
+postgres-airflow (metadata DB, dedicated) ── airflow-init (migrations + admin user, runs once)
+                                │
+              airflow-scheduler ──── airflow-webserver (:8080)
+                     └── tasks run in-process (LocalExecutor), importing the mounted ./src
+```
+
+**Quick start** (requires the batch Quick Start steps 1–4 first):
+
+```bash
+docker build -f docker/Dockerfile.airflow -t weather-airflow:2.11.2 .   # or: docker compose --profile airflow build
+make airflow-up        # POSIX shell; = docker compose --profile airflow up -d --wait ...
+# -> postgres_airflow Healthy, airflow_init Exited(0), scheduler + webserver Healthy
+```
+
+1. Open [http://localhost:8080](http://localhost:8080) and log in with the documented local defaults (`admin` / `admin` from `.env.example` — override them for anything beyond a demo).
+2. Find the DAG `weather_batch_etl_pipeline` (the only DAG — example DAGs are disabled), unpause it, then trigger it manually from the UI or:
+   ```bash
+   make airflow-trigger   # = airflow dags trigger weather_batch_etl_pipeline
+   ```
+3. A one-shot run without the scheduler (useful for local verification):
+   ```bash
+   docker exec airflow_scheduler airflow dags test weather_batch_etl_pipeline 2026-10-21T03:00
+   # -> "Load complete: 81 rows in table (2 new)" on first run; "(0 new)" on re-runs (idempotent upsert)
+   ```
+4. Re-run the same command: the row delta is 0 — the `ON CONFLICT DO NOTHING` upsert makes retried/orchestrated runs idempotent.
+
+**How the DAG reuses `src/`:** every task is a thin callable that resolves parameters from environment variables (same names and defaults as the batch CLI) and delegates — `DataExtractor` + `save_raw_json` (extract), `DataTransformer` (transform), `DataValidator` (validate), `DatabaseLoader` (load). No business logic lives in the DAG file; tasks hand off files via a named volume and push only compact values (paths, counts, a 5-float stats dict) through XCom.
+
+**Task list:**
+
+| Task | What it does | Retry policy |
+|---|---|---|
+| `extract` | Fetches the 16+92-day window via `DataExtractor`, saves raw JSON | retries on 5xx / timeout / connection errors only |
+| `transform` | `DataTransformer`: daily metrics + `temp_range`/`temp_category`, exports processed CSV | standard retries |
+| `validate` | `DataValidator` gate: impossible values **fail the run**; nulls at the window edge **warn** (reported via XCom) | standard retries |
+| `load` | `DatabaseLoader` upsert into `weather_daily`; row counts cross-checked against the table delta | standard retries (idempotent) |
+| `summary` | Logs + XCom-pushes fetched/transformed/inserted counts and duration | — |
+
+**Configuration** (added to `.env.example`):
+
+| Variable | Purpose | Example |
+|---|---|---|
+| `AIRFLOW_META_USER` / `AIRFLOW_META_DB` | Metadata DB credentials (dedicated instance) | `airflow_meta` / `airflow_meta` |
+| `AIRFLOW_META_PASSWORD` | Metadata DB password | *(secret — set in `.env`)* |
+| `AIRFLOW_ADMIN_USER` / `AIRFLOW_ADMIN_PASSWORD` | Webserver admin (documented local defaults) | `admin` / `admin` |
+| `AIRFLOW_UID` | Host UID for mounted volumes on Linux | `50000` |
+| `AIRFLOW_CONN_WEATHER_DB` | Built by Compose from the `POSTGRES_*` vars — no separate value needed | `postgres://etl_user:***@postgres:5432/weather_db` |
+
+Make targets (POSIX shell required): `airflow-up`, `airflow-down` (keeps metadata), `airflow-logs`, `airflow-trigger`, `airflow-reinit` (drops metadata volume — deletes run history).
 
 ## ⚙️ Configuration
 
@@ -333,6 +399,16 @@ More analytical queries (hot days, temperature swings, weekly aggregation) are i
 
 **Why at-least-once plus an idempotent upsert:** committing offsets only after a successful database write risks re-delivery on crash; committing before it risks data loss. For this workload, re-delivery is free to accept because `UNIQUE (station_id, observed_at)` + `ON CONFLICT DO NOTHING` collapses duplicates — so the simple, at-least-once design is correct without transactions. Exactly-once (consumer + producer in one transaction) would add complexity that the upsert already makes unnecessary.
 
+**Why Airflow orchestrates the batch path only:** batch work is naturally scheduled (a daily window closes, one run processes it) and benefits from retries, observability and backfill — exactly what a scheduler provides. The streaming consumer is the opposite shape: a long-lived process whose "scheduling" is container supervision (`restart: always`), not cron. Wrapping it in a DAG would mean a task that never ends — a well-known Airflow anti-pattern. If cross-path coordination is ever needed (e.g. "trigger batch only after N streaming readings"), the path to it is sensors/assets, listed in Future Improvements.
+
+**Why Airflow 2.11.2 and not 3.x:** Airflow 3.3.x is the current line and 2.x has left its support window, but this project pins `apache/airflow:2.11.2-python3.11` deliberately: the 2.x authoring surface (`with DAG(...)`, `PythonOperator`, cron schedules) is what a trainee is expected to know, is vastly better documented, and every 2.x idiom used here maps forward. The DAG uses the 2.4+ `schedule=` parameter (not the deprecated `schedule_interval`), so the eventual 3.x upgrade is a config change, not a rewrite. Trade-off accepted knowingly: 2.11.2 will not receive security fixes.
+
+**Why LocalExecutor and the minimal stack:** one machine, one DAG, a handful of tasks — LocalExecutor runs tasks in-process in the scheduler container with no Redis, no workers, no flower. The official Celery quick-start bundle is explicitly documented as not production-ready and would triple the footprint. Scaling out is a documented upgrade path (CeleryExecutor), not a present need.
+
+**Why a separate metadata database:** Airflow's migrations and run history must never share a schema with business data — a metadata outage or migration must not be able to touch `weather_daily`, and the weather database's size/backup profile is unrelated. Hence the dedicated `postgres-airflow` service; the DAG reaches the weather DB via an Airflow-native connection (`AIRFLOW_CONN_WEATHER_DB`) built from the same `POSTGRES_*` variables the app uses.
+
+**Why the Airflow dependency file is split from `requirements.txt`:** Airflow pins its own dependency universe via constraints files. Notably, Airflow 2.x requires **SQLAlchemy <2.0** — the Airflow runtime runs `SQLAlchemy==1.4.54` (verified end-to-end: the orchestrated load task upserts correctly), while the app/test environment keeps `SQLAlchemy>=2.0.0`. Mixing the two in one file would force one environment to lie about its dependencies or break CI. `docker/requirements-airflow.txt` pins the Airflow-runtime set to the constraint-resolved versions; the `src/` code paths used by the DAG are API-identical under both (verified by a real DAG run).
+
 ## 🧪 Testing
 
 Two tiers, separated by a pytest marker:
@@ -345,6 +421,7 @@ pytest --cov=src             # unit tests with coverage
 
 - **Unit tests** (run in every CI push): mocked HTTP responses (extract), DataFrame building, derived columns, statistics, validation (transform), mocked engines (load), and the whole streaming logic — producer encoding/queueing, consumer batch/DLQ/commit semantics, and the validation gate — against mocked `confluent_kafka` objects. **No real API calls, database connections or brokers.**
 - **Integration tests** (`tests/integration/`, marker `integration`, deselected by default): a full round trip against a live broker — create topic, produce, consume, assert transformed rows — plus malformed-record → DLQ routing. Auto-skipped when `KAFKA_BOOTSTRAP_SERVERS_HOST` is unset, so a fresh clone's plain `pytest` never fails.
+- **DAG integrity tests** (`tests/test_dag_integrity.py`): assert exactly one DAG is discovered with no import errors, the 5-task chain, `catchup=False`, the daily schedule, `retries >= 1` and an `execution_timeout` on every task, and a static guard against oversized XCom payloads. They need the Airflow dependency set (`docker/requirements-airflow.txt`, installed under the official constraints file in CI) but **no Airflow infrastructure** — no scheduler, webserver or containers. On machines without Airflow they skip with a coherent message. Run them explicitly with `pytest tests/test_dag_integrity.py`.
 - Coverage is printed to the terminal; use `--cov-report=html` for `htmlcov/index.html`.
 
 ## 🛠️ Development
@@ -358,7 +435,12 @@ src/
 ├── load/        # schema + database loading               (batch)
 ├── streaming/   # config, schemas, serialization,         (streaming)
 │                # producer, handlers, consumer
-└── dashboard/   # Streamlit visualization                 (analytics)
+├── dashboard/   # Streamlit visualization                 (analytics)
+airflow/
+└── dags/        # weather_batch_etl_pipeline.py           (orchestration)
+docker/
+├── Dockerfile.airflow         # pinned Airflow image + runtime deps
+└── requirements-airflow.txt   # Airflow-runtime dependency set
 scripts/
 └── create_topics.py   # idempotent Kafka topic provisioning
 sql/
@@ -370,6 +452,8 @@ sql/
 **Adding a new daily metric** (batch): add the field to `DataExtractor.DAILY_FIELDS` → map it in `parse_daily_metrics` (`src/transform/process_data.py`) → extend `src/load/schema.py` and `sql/schema.sql` → add tests.
 
 **Adding a new metric to the stream:** extend `WeatherEvent` + `validate_event` (`src/streaming/schemas.py`) → map it in `event_to_row` (`src/streaming/handlers.py`) → extend `weather_readings` in `sql/schema_streaming.sql` → add tests at both tiers.
+
+**Adding a new task to the DAG:** write a thin callable in `airflow/dags/weather_batch_etl_pipeline.py` that delegates to a `src/` module (no business logic in the DAG), wire it into the chain, extend `tests/test_dag_integrity.py` if the chain shape changes.
 
 **Adding a new source** (e.g. another weather provider): implement it behind the existing extract/streaming interfaces; the transform and load layers are source-agnostic by design.
 
@@ -388,6 +472,7 @@ sql/
 | Apache Kafka | 4.3.1 (pinned, KRaft) | Streaming message broker |
 | confluent-kafka | ≥ 2.5 | Kafka Python client (librdkafka) |
 | kafka-ui (provectuslabs) | v0.7.2 (pinned) | Broker/topic visualization |
+| Apache Airflow | 2.11.2-python3.11 (pinned image) | Batch path orchestration |
 | pytest | ≥ 7.4 | Testing |
 | flake8 | ≥ 6.1 | Linting |
 | Docker / Compose | ≥ 20.10.4 | Local infrastructure |
@@ -398,7 +483,10 @@ Kafka has been KRaft-only since 4.0 (no ZooKeeper); the broker runs in single-no
 
 ## 🔮 Future Improvements
 
-- Orchestration with **Apache Airflow** (scheduling, retries, backfills)
+- **Airflow 3.x upgrade** (the DAG already uses the 3.x-compatible `schedule=` parameter; the remaining work is the image pin and config keys)
+- **CeleryExecutor** for the Airflow stack when multiple concurrent DAG runs need more than one worker
+- **Alerting** on DAG failure via `on_failure_callback` (email/Slack) instead of UI-only observability
+- **Asset/sensor-based coordination** between the paths (e.g. trigger batch maintenance after streaming volume thresholds) once on Airflow 3 assets
 - **Schema Registry** for the Kafka events (evolving the event contract safely)
 - **Exactly-once semantics** via consumer/producer transactions, replacing the upsert-based deduplication
 - Cloud **dashboard hosting** (deploy the Streamlit app or build a custom web UI)
