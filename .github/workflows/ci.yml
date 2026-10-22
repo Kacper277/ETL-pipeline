@@ -91,6 +91,9 @@ jobs:
       POSTGRES_PASSWORD: ci_test_password
       POSTGRES_DB: weather_db
       DATABASE_URL: postgresql+psycopg2://etl_user:ci_test_password@localhost:5432/weather_db
+      # Airflow services are NOT started in CI, but Compose interpolates
+      # the whole file, so their required variables must resolve.
+      AIRFLOW_META_PASSWORD: ci_test_password
       # Integration tests run on the host -> host-visible broker address.
       KAFKA_BOOTSTRAP_SERVERS_HOST: localhost:9092
     steps:
