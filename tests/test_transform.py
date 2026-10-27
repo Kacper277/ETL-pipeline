@@ -107,6 +107,41 @@ class TestStatistics:
             transformer.calculate_statistics(pd.DataFrame({"date": ["2026-01-01"]}))
 
 
+class TestPartitionedParquet:
+    def test_writes_hive_layout_and_round_trips(
+        self, df: pd.DataFrame, transformer: DataTransformer, tmp_path: Path
+    ) -> None:
+        pa = pytest.importorskip("pyarrow", reason="pyarrow not installed")
+        out = transformer.export_partitioned_parquet(df, base_dir=str(tmp_path))
+        dataset = Path(out)
+        assert dataset.is_dir()
+        # hive-style partitions: date=YYYY-MM-DD/part-*.parquet
+        partitions = list(dataset.glob("date=*/*.parquet"))
+        assert len(partitions) == 3
+
+        restored = pd.read_parquet(dataset)
+        assert len(restored) == 3
+        assert set(restored.columns) == set(df.columns) - {"date"} | {"date"}
+        assert str(pa.__version__)
+
+    def test_re_run_is_idempotent_no_duplicates(
+        self, df: pd.DataFrame, transformer: DataTransformer, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("pyarrow", reason="pyarrow not installed")
+        base = str(tmp_path)
+        transformer.export_partitioned_parquet(df, base_dir=base)
+        transformer.export_partitioned_parquet(df, base_dir=base)  # second run
+        restored = pd.read_parquet(Path(base) / "weather_daily")
+        assert len(restored) == len(df)  # no duplicate rows from re-runs
+
+    def test_missing_date_column_raises(self, transformer: DataTransformer, tmp_path: Path) -> None:
+        pytest.importorskip("pyarrow", reason="pyarrow not installed")
+        with pytest.raises(KeyError):
+            transformer.export_partitioned_parquet(
+                pd.DataFrame({"temp_max_c": [1.0]}), base_dir=str(tmp_path)
+            )
+
+
 class TestValidator:
     def test_null_check(self) -> None:
         df = pd.DataFrame({"a": [1, None], "b": [1, 2]})

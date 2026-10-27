@@ -68,6 +68,18 @@ A production-style weather data project that ingests daily data from the Open-Me
 - **Streaming:** `src/streaming/` — producer, JSON serialization, schema validation, micro-batching consumer with DLQ routing; rows land in `weather_readings`.
 - **Convergence:** the view `weather_readings_daily` is shaped exactly like `weather_daily`, so the analytical SQL in `sql/queries.sql` runs unchanged against either table.
 
+### 🗃️ Data lake zones (local)
+
+The `data/` directory is organized as a miniature lake, mirroring the zone pattern used in cloud lakes:
+
+| Zone | Path | Format | Analogy |
+|---|---|---|---|
+| Bronze (raw) | `data/raw/*.json` | as-received API JSON | S3 raw zone |
+| Silver (curated) | `data/processed/weather_daily/date=YYYY-MM-DD/*.parquet` | columnar, date-partitioned | S3 curated zone |
+| Serving | PostgreSQL tables | relational | warehouse/serving layer |
+
+The silver zone is written by `DataTransformer.export_partitioned_parquet` (idempotent — re-runs overwrite, never duplicate). `terraform/` contains a reviewable AWS IaC scaffold (versioned, encrypted S3 bucket + least-privilege IAM) showing where the curated zone would live in the cloud.
+
 Why both paths in one repository: batch covers history, backfill and replay; streaming covers near-real-time arrival. Shipping both over one source and one analytical layer shows the trade-off instead of telling it — see [Design Decisions](#-design-decisions-batch-vs-streaming).
 
 ## 🚀 Quick Start (Batch Path)
@@ -278,7 +290,7 @@ python -m src.streaming.consume
 
 ### 📊 Dashboard
 
-A Streamlit app (`src/dashboard/app.py`) reads the `weather_daily` table and shows KPI cards (avg max/min temp, total rain, rainy-day count), temperature line and rainfall bar charts, weekly averages, and sidebar filters. Run it with `streamlit run src/dashboard/app.py` or `docker compose up -d dashboard` (then open [http://localhost:8501](http://localhost:8501)).
+A Streamlit app (`src/dashboard/app.py`) reads **both serving tables** — `weather_daily` (batch) and `weather_readings` (streaming, with per-station charts) — and shows KPI cards (avg max/min temp, total rain, rainy-day count), temperature line and rainfall bar charts, weekly averages, and sidebar filters. Run it with `streamlit run src/dashboard/app.py` or `docker compose up -d dashboard` (then open [http://localhost:8501](http://localhost:8501)).
 
 *(Screenshot placeholders: `docs/screenshots/pipeline_run.png`, `docs/screenshots/psql_results.png`, `docs/screenshots/kafka_ui.png`)*
 
@@ -385,7 +397,7 @@ Sample output of the last query against the demo run (real captured output, 3 de
  warsaw-1   |       18 | 2026-10-19 23:17:15+00   | 2026-10-20 00:10:31+00
 ```
 
-More analytical queries (hot days, temperature swings, weekly aggregation) are in [`sql/queries.sql`](sql/queries.sql).
+More analytical queries (hot days, temperature swings, weekly aggregation, a window-function "latest reading per station", and a batch-vs-stream daily comparison through the convergence view) are in [`sql/queries.sql`](sql/queries.sql).
 
 ## ⚖️ Design Decisions: Batch vs Streaming
 
@@ -441,6 +453,7 @@ airflow/
 docker/
 ├── Dockerfile.airflow         # pinned Airflow image + runtime deps
 └── requirements-airflow.txt   # Airflow-runtime dependency set
+terraform/        # AWS IaC scaffold for the lake (S3 + IAM)  (cloud)
 scripts/
 └── create_topics.py   # idempotent Kafka topic provisioning
 sql/
@@ -466,6 +479,7 @@ sql/
 | Python | 3.11 | Main language |
 | requests | ≥ 2.31 | HTTP client |
 | pandas | ≥ 2.1 | Data processing |
+| pyarrow | ≥ 15 | Columnar Parquet lake output |
 | SQLAlchemy | ≥ 2.0 | Database ORM/engine |
 | psycopg2-binary | ≥ 2.9 | PostgreSQL driver |
 | PostgreSQL | 15 (Alpine) | Target database |
@@ -477,6 +491,7 @@ sql/
 | flake8 | ≥ 6.1 | Linting |
 | Docker / Compose | ≥ 20.10.4 | Local infrastructure |
 | Streamlit | ≥ 1.31 | Dashboard visualization |
+| Terraform | ≥ 1.5 (scaffold) | IaC for the AWS lake (not applied by CI) |
 | GitHub Actions | — | CI/CD |
 
 Kafka has been KRaft-only since 4.0 (no ZooKeeper); the broker runs in single-node combined mode via the official `apache/kafka:4.3.1` image.
@@ -490,7 +505,9 @@ Kafka has been KRaft-only since 4.0 (no ZooKeeper); the broker runs in single-no
 - **Schema Registry** for the Kafka events (evolving the event contract safely)
 - **Exactly-once semantics** via consumer/producer transactions, replacing the upsert-based deduplication
 - Cloud **dashboard hosting** (deploy the Streamlit app or build a custom web UI)
-- Deployment to the **cloud** (e.g. AWS RDS + ECS / MSK)
+- Deployment to the **cloud** (e.g. AWS RDS + ECS / MSK) — the `terraform/` scaffold is the starting point
+- **Data quality framework** (Great Expectations) instead of the basic validator
+- **PySpark lab** on the Parquet lake (the pandas transform stage is the unit of work a Spark job would parallelize) and a **Databricks** trial on the curated zone
 
 ## 👤 Author & Contact
 
