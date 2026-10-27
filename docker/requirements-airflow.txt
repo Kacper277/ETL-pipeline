@@ -11,3 +11,7 @@ SQLAlchemy==1.4.54
 psycopg2-binary==2.9.11
 requests==2.32.5
 python-dotenv==1.2.2
+# Needed in CI where the parquet-export tests run alongside the
+# Airflow dependency set; the constraints file resolves it to 18.1.0,
+# the release compatible with the pinned numpy 1.26.4.
+pyarrow
