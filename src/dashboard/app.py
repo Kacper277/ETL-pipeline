@@ -16,16 +16,27 @@ from sqlalchemy import create_engine
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg2://etl_user:weather_pass@localhost:5433/weather_db"
-
 st.set_page_config(page_title="Weather ETL Dashboard", page_icon="🌦️", layout="wide")
 
 
 @st.cache_resource
 def get_engine():
-    """Create a cached SQLAlchemy engine from the environment."""
+    """Create a cached SQLAlchemy engine from the environment.
+
+    Returns:
+        A SQLAlchemy engine built from ``DATABASE_URL``.
+
+    Raises:
+        RuntimeError: If ``DATABASE_URL`` is not configured - no
+            credentials are ever hardcoded as fallbacks.
+    """
     load_dotenv()
-    url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Copy .env.example to .env and fill "
+            "in the PostgreSQL section (see .env.example)."
+        )
     return create_engine(url)
 
 
@@ -42,10 +53,51 @@ def load_data() -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=300)
+def load_readings() -> pd.DataFrame:
+    """Load recent station readings from the weather_readings table.
+
+    Returns:
+        DataFrame of streamed readings, newest first.
+    """
+    query = (
+        "SELECT station_id, observed_at, temp_max_c, temp_min_c, rain_mm, ingested_at "
+        "FROM weather_readings ORDER BY observed_at DESC"
+    )
+    with get_engine().connect() as conn:
+        df = pd.read_sql(query, conn)
+    df["observed_at"] = pd.to_datetime(df["observed_at"])
+    return df
+
+
 def main() -> None:
     """Render the dashboard UI."""
     st.title("🌦️ Weather ETL Dashboard")
     st.caption("Data sourced from the Open-Meteo API via the ETL pipeline")
+
+    # --- Streaming readings (weather_readings) ---------------------------
+    st.subheader("📡 Streaming readings (Kafka path)")
+    try:
+        readings = load_readings()
+        if readings.empty:
+            st.info("No streamed readings yet. Run the streaming path: "
+                    "`python -m src.streaming.produce_demo` + `python -m src.streaming.consume`.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Readings", len(readings))
+            c2.metric("Stations", readings["station_id"].nunique())
+            c3.metric("Latest", readings["observed_at"].max().strftime("%Y-%m-%d %H:%M"))
+            per_station = (
+                readings.pivot_table(index="observed_at", columns="station_id",
+                                     values="temp_max_c")
+            )
+            st.line_chart(per_station)
+            st.dataframe(readings.head(100), use_container_width=True)
+    except Exception as exc:  # noqa: BLE001 - the streaming table may not exist yet
+        st.info(f"Streaming data unavailable: {exc}")
+
+    # --- Batch data (weather_daily) ---------------------------------------
+    st.subheader("🗓️ Batch data")
 
     try:
         df = load_data()
