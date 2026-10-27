@@ -65,6 +65,9 @@
 -- Purpose: Roll daily data up to ISO weeks to observe trends.
 --          Requires at least a few days of data.
 -- Expected result: 1 row per ISO week in the dataset.
+-- NOTE: runs unchanged against the STREAMING table's daily view
+--       `weather_readings_daily` (same columns) - the convergence
+--       point between the batch and streaming paths.
 -- ------------------------------------------------------------
 -- Uncomment to run:
 -- SELECT
@@ -76,3 +79,40 @@
 -- FROM weather_daily
 -- GROUP BY week_start
 -- ORDER BY week_start;
+
+-- ------------------------------------------------------------
+-- Query 6: Latest reading per streaming station (window function)
+-- Purpose: Demonstrates ROW_NUMBER() OVER (PARTITION BY ...) on the
+--          streaming table - a common "latest event per key" pattern.
+-- Expected result: one row per station_id, its most recent reading.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT station_id, observed_at, temp_max_c, temp_min_c, rain_mm
+-- FROM (
+--     SELECT
+--         station_id, observed_at, temp_max_c, temp_min_c, rain_mm,
+--         ROW_NUMBER() OVER (PARTITION BY station_id ORDER BY observed_at DESC) AS rn
+--     FROM weather_readings
+-- ) ranked
+-- WHERE rn = 1
+-- ORDER BY station_id;
+
+-- ------------------------------------------------------------
+-- Query 7: Daily comparison of both ingestion paths
+-- Purpose: Join the batch table with the streaming daily view to
+--          compare aggregates per day - shows the convergence view
+--          in action.
+-- Expected result: one row per date present in BOTH paths, with the
+--          batch and streamed daily aggregates side by side.
+-- ------------------------------------------------------------
+-- Uncomment to run:
+-- SELECT
+--     b.date,
+--     b.avg_temp_max AS batch_avg_temp_max,
+--     s.avg_temp_max AS stream_avg_temp_max
+-- FROM (
+--     SELECT date, ROUND(AVG(temp_max_c), 2) AS avg_temp_max
+--     FROM weather_daily GROUP BY date
+-- ) b
+-- JOIN weather_readings_daily s ON s.date = b.date
+-- ORDER BY b.date DESC;

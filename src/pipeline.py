@@ -40,6 +40,7 @@ def main() -> None:
     report = DataValidator().full_validation_report(df)
     print(report)
     transformer.export_to_csv(df)
+    transformer.export_partitioned_parquet(df)
 
     # Load
     loader = DatabaseLoader(database_url)

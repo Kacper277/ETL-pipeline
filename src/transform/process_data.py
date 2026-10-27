@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -165,3 +166,38 @@ class DataTransformer:
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=False, encoding="utf-8")
         logger.info("Processed data exported to %s", path)
+
+    def export_partitioned_parquet(
+        self, df: pd.DataFrame, base_dir: str = "data/processed"
+    ) -> str:
+        """Export the processed DataFrame as a partitioned Parquet dataset.
+
+        Writes a hive-style layout (``<base_dir>/weather_daily/date=YYYY-MM-DD/``),
+        which is the on-disk pattern used by data lakes: columnar files,
+        partitioned by date, selectively readable by tools such as
+        Spark, DuckDB or pandas.
+
+        Args:
+            df: DataFrame with a ``date`` datetime column.
+            base_dir: Base directory of the local lake.
+
+        Returns:
+            The dataset root path.
+
+        Raises:
+            KeyError: If the ``date`` column is missing.
+        """
+        if "date" not in df.columns:
+            raise KeyError("DataFrame must contain a 'date' column")
+
+        dataset_path = Path(base_dir) / "weather_daily"
+        # Idempotent overwrite: pyarrow would otherwise append a new
+        # part-file per partition on every run, duplicating rows on read.
+        if dataset_path.exists():
+            shutil.rmtree(dataset_path)
+        dataset_path.mkdir(parents=True, exist_ok=True)
+        out = df.copy()
+        out["date"] = out["date"].dt.strftime("%Y-%m-%d")
+        out.to_parquet(dataset_path, partition_cols=["date"], index=False)
+        logger.info("Partitioned Parquet dataset written to %s", dataset_path)
+        return str(dataset_path)
